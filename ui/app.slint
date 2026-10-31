@@ -1,0 +1,653 @@
+import { Button, LineEdit, ListView, Palette, ProgressIndicator } from "std-widgets.slint";
+
+export struct SidebarRow {
+    title: string,
+    subtitle: string,
+    active: bool,
+}
+
+export struct FileRow {
+    name: string,
+    size: string,
+    modified: string,
+    is-folder: bool,
+    selected: bool,
+}
+
+export enum DialogKind {
+    none,
+    rename,
+    new-folder,
+    confirm-delete,
+    conflict,
+}
+
+component SidebarItem {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> active;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    min-height: 48px;
+
+    Rectangle {
+        border-radius: 6px;
+        background: root.active ? Palette.selection-background
+            : touch.has-hover && root.enabled ? Palette.alternate-background
+            : transparent;
+    }
+
+    VerticalLayout {
+        alignment: center;
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 2px;
+
+        Text {
+            text: root.title;
+            overflow: elide;
+            font-weight: 600;
+            color: root.active ? Palette.selection-foreground : Palette.foreground;
+        }
+        Text {
+            text: root.subtitle;
+            overflow: elide;
+            font-size: 11px;
+            opacity: 0.7;
+            color: root.active ? Palette.selection-foreground : Palette.foreground;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SectionLabel inherits Text {
+    font-size: 11px;
+    font-weight: 600;
+    opacity: 0.65;
+}
+
+component FileIcon {
+    in property <bool> is-folder;
+    width: 18px;
+    height: 18px;
+
+    if root.is-folder: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: #e0a93b;
+        commands: "M3 6a2 2 0 0 1 2-2h4.6l2 2.4H19a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z";
+    }
+    if !root.is-folder: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: Palette.foreground;
+        stroke-width: 1.6px;
+        opacity: 0.65;
+        commands: "M6 3h8l4 4v14H6zM14 3v4h4";
+    }
+}
+
+component CrumbLink {
+    in property <string> label;
+    in property <bool> enabled: true;
+    in property <bool> current;
+    callback clicked;
+
+    HorizontalLayout {
+        padding-left: 4px;
+        padding-right: 4px;
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            overflow: elide;
+            font-weight: root.current ? 600 : 400;
+            color: touch.has-hover && root.enabled && !root.current ? Palette.accent-background : Palette.foreground;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled && !root.current;
+        mouse-cursor: root.enabled && !root.current ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+component DialogFrame {
+    in property <string> title;
+    in property <string> message;
+    callback dismissed;
+
+    // 背面のクリックを受け止めて、ダイアログ外の操作を防ぐ
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #00000066;
+        TouchArea { }
+    }
+
+    scope := FocusScope {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.dismissed();
+                return accept;
+            }
+            return reject;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(root.width - 48px, 460px);
+            height: content.preferred-height;
+            border-radius: 10px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000055;
+
+            content := VerticalLayout {
+                padding: 20px;
+                spacing: 14px;
+
+                Text {
+                    text: root.title;
+                    font-size: 16px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                if root.message != "": Text {
+                    text: root.message;
+                    wrap: word-wrap;
+                }
+                @children
+            }
+        }
+    }
+
+    public function take-focus() {
+        scope.focus();
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "MTP Files";
+    preferred-width: 1000px;
+    preferred-height: 640px;
+    min-width: 960px;
+    min-height: 420px;
+    background: Palette.background;
+
+    in property <[SidebarRow]> devices;
+    in property <[SidebarRow]> storages;
+    in property <[FileRow]> files;
+    in property <[string]> crumbs;
+    in property <bool> connected;
+    in property <bool> busy;
+    in property <bool> transferring;
+    in property <float> progress;
+    in property <bool> progress-known;
+    in property <string> status-text;
+    in property <string> error-text;
+    in property <string> empty-text;
+    in property <int> selection-count;
+    in property <bool> single-selected;
+
+    in-out property <DialogKind> dialog: DialogKind.none;
+    in property <string> dialog-title;
+    in property <string> dialog-message;
+    in property <string> dialog-input;
+    in property <int> dialog-select-end;
+
+    callback refresh-devices();
+    callback device-clicked(int);
+    callback storage-clicked(int);
+    callback row-pressed(int, bool, bool);
+    callback row-activated(int);
+    callback crumb-clicked(int);
+    callback refresh();
+    callback upload-files();
+    callback upload-folder();
+    callback download();
+    callback open-rename();
+    callback open-new-folder();
+    callback open-delete();
+    callback activate-selection();
+    callback go-up();
+    callback select-all();
+    callback clear-selection();
+    callback dialog-submit(string);
+    callback delete-confirmed();
+    callback conflict-resolved(bool);
+    callback dialog-closed();
+    callback cancel-operation();
+    callback dismiss-error();
+
+    property <bool> can-act: root.connected && !root.busy;
+
+    public function focus-list() {
+        keys.focus();
+    }
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if root.dialog != DialogKind.none {
+                return reject;
+            }
+            if event.text == Key.F2 {
+                root.open-rename();
+                return accept;
+            }
+            if event.text == Key.Delete {
+                root.open-delete();
+                return accept;
+            }
+            if event.text == Key.Return {
+                root.activate-selection();
+                return accept;
+            }
+            if event.text == Key.Backspace {
+                root.go-up();
+                return accept;
+            }
+            if event.text == Key.Escape {
+                root.clear-selection();
+                return accept;
+            }
+            if event.modifiers.control && event.text == "a" {
+                root.select-all();
+                return accept;
+            }
+            return reject;
+        }
+
+        HorizontalLayout {
+            // ------------------------------------------------ デバイスとストレージ
+            Rectangle {
+                width: 240px;
+                background: Palette.alternate-background;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        SectionLabel {
+                            text: "デバイス";
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "再検出";
+                            enabled: !root.busy;
+                            clicked => { root.refresh-devices(); }
+                        }
+                    }
+
+                    for row[index] in root.devices: SidebarItem {
+                        title: row.title;
+                        subtitle: row.subtitle;
+                        active: row.active;
+                        enabled: !root.busy;
+                        clicked => { root.device-clicked(index); }
+                    }
+
+                    if root.connected: Rectangle { height: 8px; }
+                    if root.connected: SectionLabel { text: "ストレージ"; }
+
+                    for row[index] in root.storages: SidebarItem {
+                        title: row.title;
+                        subtitle: row.subtitle;
+                        active: row.active;
+                        enabled: !root.busy;
+                        clicked => { root.storage-clicked(index); }
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+
+            // ------------------------------------------------ ファイル一覧
+            VerticalLayout {
+                horizontal-stretch: 1;
+
+                HorizontalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+
+                    Button {
+                        text: "デバイスへコピー…";
+                        primary: true;
+                        enabled: root.can-act;
+                        clicked => { root.upload-files(); }
+                    }
+                    Button {
+                        text: "フォルダをコピー…";
+                        enabled: root.can-act;
+                        clicked => { root.upload-folder(); }
+                    }
+                    Button {
+                        text: "PC へ保存…";
+                        enabled: root.can-act && root.selection-count > 0;
+                        clicked => { root.download(); }
+                    }
+                    Rectangle { width: 8px; }
+                    Button {
+                        text: "名前変更";
+                        enabled: root.can-act && root.single-selected;
+                        clicked => { root.open-rename(); }
+                    }
+                    Button {
+                        text: "新規フォルダ";
+                        enabled: root.can-act;
+                        clicked => { root.open-new-folder(); }
+                    }
+                    Button {
+                        text: "削除";
+                        enabled: root.can-act && root.selection-count > 0;
+                        clicked => { root.open-delete(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+
+                // パンくず
+                HorizontalLayout {
+                    height: 36px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-bottom: 4px;
+
+                    if root.connected: CrumbLink {
+                        label: "ルート";
+                        enabled: !root.busy;
+                        current: root.crumbs.length == 0;
+                        clicked => { root.crumb-clicked(0); }
+                    }
+                    for crumb[index] in root.crumbs: HorizontalLayout {
+                        Text {
+                            text: "›";
+                            vertical-alignment: center;
+                            opacity: 0.5;
+                        }
+                        CrumbLink {
+                            label: crumb;
+                            enabled: !root.busy;
+                            current: index == root.crumbs.length - 1;
+                            clicked => { root.crumb-clicked(index + 1); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    if root.connected: Button {
+                        text: "更新";
+                        enabled: root.can-act;
+                        clicked => { root.refresh(); }
+                    }
+                }
+
+                // 見出し
+                Rectangle {
+                    height: 28px;
+                    background: Palette.alternate-background;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+                        Text {
+                            text: "名前";
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            opacity: 0.7;
+                        }
+                        Text {
+                            text: "サイズ";
+                            width: 80px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            opacity: 0.7;
+                        }
+                        Text {
+                            text: "更新日時";
+                            width: 130px;
+                            vertical-alignment: center;
+                            font-size: 12px;
+                            opacity: 0.7;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+
+                    ListView {
+                        for row[index] in root.files: Rectangle {
+                            height: 32px;
+                            background: row.selected ? Palette.selection-background
+                                : row-touch.has-hover ? Palette.alternate-background
+                                : transparent;
+
+                            HorizontalLayout {
+                                padding-left: 14px;
+                                padding-right: 14px;
+                                spacing: 10px;
+
+                                FileIcon {
+                                    is-folder: row.is-folder;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                Text {
+                                    text: row.name;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                }
+                                Text {
+                                    text: row.size;
+                                    width: 80px;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    font-size: 12px;
+                                    color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                }
+                                Text {
+                                    text: row.modified;
+                                    width: 130px;
+                                    vertical-alignment: center;
+                                    font-size: 12px;
+                                    color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                }
+                            }
+
+                            row-touch := TouchArea {
+                                enabled: !root.busy;
+                                pointer-event(event) => {
+                                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                        keys.focus();
+                                        root.row-pressed(index, event.modifiers.control, event.modifiers.shift);
+                                    }
+                                }
+                                double-clicked => { root.row-activated(index); }
+                            }
+                        }
+                    }
+
+                    if root.files.length == 0: Text {
+                        x: 24px;
+                        width: parent.width - 48px;
+                        height: parent.height;
+                        text: root.empty-text;
+                        wrap: word-wrap;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        opacity: 0.65;
+                    }
+                }
+
+                // エラー表示
+                if root.error-text != "": Rectangle {
+                    background: #c4314b;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 8px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 8px;
+                        Text {
+                            text: root.error-text;
+                            color: white;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "閉じる";
+                            clicked => { root.dismiss-error(); }
+                        }
+                    }
+                }
+
+                // 状態表示
+                Rectangle {
+                    height: 40px;
+                    background: Palette.alternate-background;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        Text {
+                            text: root.status-text;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            font-size: 12px;
+                        }
+                        if root.transferring: VerticalLayout {
+                            alignment: center;
+                            ProgressIndicator {
+                                width: 180px;
+                                progress: root.progress;
+                                indeterminate: !root.progress-known;
+                            }
+                        }
+                        if root.transferring: VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "キャンセル";
+                                clicked => { root.cancel-operation(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------- ダイアログ
+    if root.dialog == DialogKind.rename || root.dialog == DialogKind.new-folder: DialogFrame {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        title: root.dialog-title;
+        dismissed => { root.dialog-closed(); }
+
+        input := LineEdit {
+            text: root.dialog-input;
+            accepted(text) => { root.dialog-submit(text); }
+            init => {
+                self.focus();
+                self.set-selection-offsets(0, root.dialog-select-end);
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "キャンセル";
+                clicked => { root.dialog-closed(); }
+            }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.dialog-submit(input.text); }
+            }
+        }
+    }
+
+    if root.dialog == DialogKind.confirm-delete: DialogFrame {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        title: root.dialog-title;
+        message: root.dialog-message;
+        dismissed => { root.dialog-closed(); }
+        init => { self.take-focus(); }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "キャンセル";
+                clicked => { root.dialog-closed(); }
+            }
+            Button {
+                text: "削除する";
+                primary: true;
+                clicked => { root.delete-confirmed(); }
+            }
+        }
+    }
+
+    if root.dialog == DialogKind.conflict: DialogFrame {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        title: root.dialog-title;
+        message: root.dialog-message;
+        dismissed => { root.dialog-closed(); }
+        init => { self.take-focus(); }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "キャンセル";
+                clicked => { root.dialog-closed(); }
+            }
+            Button {
+                text: "スキップ";
+                clicked => { root.conflict-resolved(false); }
+            }
+            Button {
+                text: "上書き";
+                primary: true;
+                clicked => { root.conflict-resolved(true); }
+            }
+        }
+    }
+}

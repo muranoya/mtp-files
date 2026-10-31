@@ -1,6 +1,9 @@
+mod app;
 mod names;
 mod selection;
 mod transfer;
 mod worker;
 
-fn main() {}
+fn main() -> Result<(), slint::PlatformError> {
+    app::run()
+}
