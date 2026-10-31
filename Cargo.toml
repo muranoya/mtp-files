@@ -1,0 +1,35 @@
+[package]
+name = "mtp-files"
+version = "0.1.0"
+edition = "2024"
+description = "MTP デバイスとファイルをやり取りするシンプルな Linux 向け GUI"
+publish = false
+
+[features]
+# 実機なしで動作確認するための仮想デバイス（MTP_FILES_VIRTUAL_DIR で有効化）
+virtual-device = ["mtp-rs/virtual-device"]
+
+[dependencies]
+bytes = "1"
+futures = "0.3"
+mtp-rs = "0.36"
+rfd = "0.17"
+slint = { version = "1", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "accessibility",
+    "compat-1-2",
+] }
+
+[build-dependencies]
+slint-build = "1"
+
+[dev-dependencies]
+mtp-rs = { version = "0.36", features = ["virtual-device"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
